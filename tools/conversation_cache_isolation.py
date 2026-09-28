@@ -14,15 +14,13 @@ import threading
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'tools')]
-from conversation_cache_parity import engine_args, require
+from conversation_cache_parity import STATE_KEYS, engine_args, require
 from gguf_reader import GGUFFile
 from gguf_writer import GGUFWriter
 from serve.server import StrataEngine, child_env
 from serve.frontend import ChatTemplate
 import strata_tokenizer as ST
 import numpy as np
-
-STATE_KEYS = ('L', 'gdn', 'ple', 'tail', 'pooled', 'kv', 'ple_prev')
 
 
 def fixtures(output, width):

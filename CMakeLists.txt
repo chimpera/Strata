@@ -47,6 +47,9 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(conversation_cache_test src/core/conversation_cache_test.cpp)
   target_include_directories(conversation_cache_test PRIVATE include)
   add_test(NAME conversation_cache_test COMMAND conversation_cache_test)
+  add_executable(conversation_memory_test src/core/conversation_memory_test.cpp src/core/conversation_memory.cpp)
+  target_include_directories(conversation_memory_test PRIVATE include)
+  add_test(NAME conversation_memory_test COMMAND conversation_memory_test)
 endif()
 
 if(STRATA_ENABLE_CUDA)
@@ -255,7 +258,7 @@ if(STRATA_ENABLE_CUDA)
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
   add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
-    src/core/conversation_snapshot.cpp)
+    src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu CUDA::cudart)
   if(STRATA_BUILD_CONVERSATION_TESTS)
@@ -263,6 +266,19 @@ if(STRATA_ENABLE_CUDA)
     target_link_libraries(conversation_snapshot_test PRIVATE strata_engine)
     add_test(NAME conversation_snapshot_test COMMAND conversation_snapshot_test)
     set_tests_properties(conversation_snapshot_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    add_executable(conversation_validation_test src/core/conversation_validation_test.cpp)
+    target_link_libraries(conversation_validation_test PRIVATE strata_engine)
+    add_test(NAME conversation_validation_test COMMAND conversation_validation_test)
+    set_tests_properties(conversation_validation_test PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 120)
+    if(UNIX AND NOT APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      add_executable(conversation_transfer_test src/core/conversation_validation_test.cpp)
+      target_compile_definitions(conversation_transfer_test PRIVATE CONVERSATION_TEST_TRANSFERS)
+      target_link_options(conversation_transfer_test PRIVATE
+        -Wl,--wrap=cudaMemcpy -Wl,--wrap=cudaDeviceSynchronize -Wl,--wrap=cudaGetLastError)
+      target_link_libraries(conversation_transfer_test PRIVATE strata_engine)
+      add_test(NAME conversation_transfer_test COMMAND conversation_transfer_test)
+      set_tests_properties(conversation_transfer_test PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=-1" TIMEOUT 120)
+    endif()
   endif()
 
   # `strata generate` (P2.S6).  The FIRST user-facing program: everything under it is a component, and this is

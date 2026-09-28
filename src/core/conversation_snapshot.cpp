@@ -1,5 +1,6 @@
 #include "strata/core/conversation_snapshot.hpp"
 #include "strata/kernels/kv_q4.hpp"
+#include "conversation_checked.hpp"
 #include <cuda_runtime.h>
 
 #include <array>
@@ -22,16 +23,30 @@ bool valid_extent(const QsaState& st, int64_t upto, std::string& error) {
     return true;
 }
 
-Layout layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index) {
+bool layout(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index, Layout& l, std::string& error) {
+    if (!valid_extent(st, upto, error)) return false;
     const auto s = strata::kernels::qsa_real_shapes();
+    if (g.n_head_kv <= 0 || g.head_dim <= 0 || g.head_dim > INT32_MAX || g.idx_key_dim <= 0 ||
+        (st.kv_q4 && g.head_dim % 32) || (st.kv_int8 && !st.kv_q4 && g.head_dim % 64)) {
+        error = "conversation snapshot: invalid K/V geometry";
+        return false;
+    }
     const int64_t cells = ((upto + s.page_size - 1) / s.page_size) * s.page_size;
-    const size_t rows = (size_t) cells * (size_t) g.n_head_kv;
     const size_t per = st.kv_q4 ? (size_t) strata::kernels::kv_q4_bytes_per_head((int) g.head_dim)
                               : (size_t) g.head_dim * (st.kv_int8 ? 1 : 2);
-    const int64_t pooled = index ? upto / s.idx_block : 0;
-    return {qsa_kv_format(st), cells, pooled, s.page_size, rows * per,
-            st.kv_int8 && !st.kv_q4 ? rows * (size_t) (g.head_dim / 64) * 2 : 0,
-            (size_t) pooled * (size_t) g.idx_key_dim * sizeof(float)};
+    // Include the moving spare row, not only completed blocks. The checkpoint
+    // restore reconstructs that row when rewinding to an earlier prefix.
+    const int64_t pooled = index && upto > 0 ? upto / s.idx_block + 1 : 0;
+    l = {qsa_kv_format(st), cells, pooled, s.page_size, 0, 0, 0};
+    using conversation_detail::product;
+    if (!product(l.data, {(uint64_t) cells, (uint64_t) g.n_head_kv, per}) ||
+        !product(l.scales, {(uint64_t) cells, (uint64_t) g.n_head_kv,
+                           st.kv_int8 && !st.kv_q4 ? (uint64_t) (g.head_dim / 64) * 2 : 0}) ||
+        !product(l.pooled, {(uint64_t) pooled, (uint64_t) g.idx_key_dim, sizeof(float)})) {
+        error = "conversation snapshot: K/V byte count overflow";
+        return false;
+    }
+    return true;
 }
 
 std::array<void*, 5> pools(const QsaState& st) {
@@ -45,9 +60,25 @@ std::array<void*, 5> pools(const QsaState& st) {
 }
 
 bool valid(const QsaState& st, const Layout& l, int64_t upto, std::string& error) {
-    if (upto < 0 || upto > st.max_cells || l.cells > st.n_pages * l.page_size ||
+    if (upto < 0 || upto > st.max_cells || st.n_pages < 0 || l.cells / l.page_size > st.n_pages ||
+        st.kv_mode < 0 || st.kv_mode > 2 || st.n_slots <= 0 ||
+        (st.kv_mode == 0 && st.n_slots < st.n_pages) ||
         l.pooled_rows > st.idx_pooled_rows || (st.kv_mode != 0 && !st.host.present())) {
         error = "conversation snapshot: invalid K/V extent or missing authoritative host pool";
+        return false;
+    }
+    if (st.kv_mode == 1) {
+        const auto& m = st.map;
+        if (m.n_blocks != st.n_pages || m.n_slots != st.n_slots || !m.page_table || !m.slot_block ||
+            !m.slot_stamp || !m.slot_ref || !m.ctl || !m.miss_block || !m.miss_slot) {
+            error = "conversation snapshot: invalid streaming map";
+            return false;
+        }
+    }
+    if (st.kv_mode == 2 && (!st.page_table ||
+        (st.kv_q4 ? !st.k_q4 || !st.v_q4 : st.kv_int8 ? !st.k_q || !st.v_q || !st.k_scale || !st.v_scale
+                                                    : !st.k_pool || !st.v_pool))) {
+        error = "conversation snapshot: invalid draft ring";
         return false;
     }
     return true;
@@ -66,15 +97,18 @@ bool transfer(void* dst, const void* src, size_t n, std::string& error) {
 
 size_t conversation_kv_bytes(const QsaState& st, const ModelGeometry& g, int64_t upto, bool index) {
     std::string error;
-    if (!valid_extent(st, upto, error)) return 0;
-    const auto l = layout(st, g, upto, index);
-    return 2 * (l.data + l.scales) + l.pooled;
+    Layout l{};
+    if (!layout(st, g, upto, index, l, error) || !valid(st, l, upto, error)) return 0;
+    size_t bytes = l.pooled;
+    for (size_t n : {l.data, l.data, l.scales, l.scales})
+        if (!conversation_detail::add(bytes, n)) return 0;
+    return bytes;
 }
 
 bool conversation_kv_save(ConversationKv& image, const QsaState& st, const ModelGeometry& g,
                           int64_t upto, bool index, std::string& error) {
-    if (!valid_extent(st, upto, error)) return false;
-    const auto l = layout(st, g, upto, index);
+    Layout l{};
+    if (!layout(st, g, upto, index, l, error)) return false;
     if (!valid(st, l, upto, error)) return false;
     image.format = l.format;
     image.cells = l.cells;
@@ -93,10 +127,10 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
     return true;
 }
 
-bool conversation_kv_restore(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
-                             int64_t upto, bool index, std::string& error) {
-    if (!valid_extent(st, upto, error)) return false;
-    const auto l = layout(st, g, upto, index);
+bool conversation_kv_validate(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
+                              int64_t upto, bool index, std::string& error) {
+    Layout l{};
+    if (!layout(st, g, upto, index, l, error)) return false;
     if (!valid(st, l, upto, error)) return false;
     const std::array<size_t,5> sizes = {l.data, l.data, l.scales, l.scales, l.pooled};
     const std::array<const std::vector<uint8_t>*,5> src = {&image.k, &image.v, &image.k_scale, &image.v_scale, &image.pooled};
@@ -111,14 +145,30 @@ bool conversation_kv_restore(const ConversationKv& image, const QsaState& st, co
     const auto dst = pools(st);
     for (size_t i = 0; i < src.size(); ++i)
         if (sizes[i] && !dst[i]) { error = "conversation snapshot: missing target state buffer"; return false; }
+    return true;
+}
+
+bool conversation_kv_restore(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
+                             int64_t upto, bool index, std::string& error) {
+    if (!conversation_kv_validate(image, st, g, upto, index, error)) return false;
+    const std::array<const std::vector<uint8_t>*,5> src = {&image.k, &image.v, &image.k_scale, &image.v_scale, &image.pooled};
+    const auto dst = pools(st);
     for (size_t i = 0; i < src.size(); ++i)
-        if (!transfer(dst[i], src[i]->data(), sizes[i], error)) return false;
+        if (!transfer(dst[i], src[i]->data(), src[i]->size(), error)) return false;
     // VRAM slots still contain the outgoing conversation. Resolve must refill
     // them from the restored authoritative pools before any attention reads.
     if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, nullptr);
-    // Ring (mode 2) slots are refilled by MtpDrafter::kv_restore at the selected
-    // checkpoint, which may be earlier than this snapshot's final live position.
-    return true;
+    if (st.kv_mode == 2 && upto > 0) {
+        auto shapes = strata::kernels::qsa_real_shapes();
+        shapes.n_head_kv = g.n_head_kv; shapes.head_dim = g.head_dim;
+        const int64_t end = (upto + shapes.page_size - 1) / shapes.page_size;
+        strata::kernels::kv_ring_restore(qsa_attn_pools(st), st.host, qsa_kv_format(st),
+                                        std::max<int64_t>(0, end - st.n_slots), end, st.n_slots, shapes, nullptr);
+    }
+    const auto status = cudaGetLastError();
+    if (status == cudaSuccess) return true;
+    error = std::string("conversation snapshot residency restore: ") + cudaGetErrorString(status);
+    return false;
 }
 
 } // namespace strata::core

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -20,11 +21,11 @@ struct ConversationImageKey {
 struct ConversationCheckpoint {
     std::vector<int32_t> ids;
     std::vector<ConversationImageKey> imgs;
-    std::vector<uint8_t> gdn, ple, tails;
+    std::vector<uint8_t> gdn, ple, tails, dead, block_pos;
 
     size_t bytes() const {
         return ids.capacity() * sizeof(int32_t) + imgs.capacity() * sizeof(ConversationImageKey) +
-               gdn.capacity() + ple.capacity() + tails.capacity();
+               gdn.capacity() + ple.capacity() + tails.capacity() + dead.capacity() + block_pos.capacity();
     }
 };
 
@@ -40,6 +41,8 @@ struct ConversationKv {
 };
 
 struct SavedConversation {
+    // Runtime compatibility only; NOT a model/weights identity or disk schema.
+    std::array<int64_t, 18> geometry{};
     ConversationCheckpoint live;
     std::vector<ConversationCheckpoint> checkpoints;
     std::vector<ConversationKv> kv; // main layers followed by the draft layer

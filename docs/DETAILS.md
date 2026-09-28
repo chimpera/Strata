@@ -310,6 +310,19 @@ Snapshots contain running state, checkpoints, used K/V pages, and draft-layer K/
 They add host RAM, not another model or VRAM allocation. The byte budget also counts
 an incoming snapshot during a switch; oldest parked entries are evicted first.
 Oversized snapshots or host allocation failures fall back to ordinary prompt processing.
+`--conversation-cache-min-free-mib N` (default 2560) additionally requires that
+physical-RAM headroom remain available: the engine checks before allocation and
+again after capture. Unknown telemetry or insufficient RAM skips parking. Windows
+uses `GlobalMemoryStatusEx`, Linux uses `MemAvailable`; these are host-level samples,
+not a reservation or enforcement of container/job memory limits. An 8 GiB budget
+is a cap, not a recommendation for every machine.
+
+The shared snapshot core validates all layers and checkpoints before applying any
+state. Invalid entries are discarded; transfer/synchronization failure is fatal
+rather than permission to continue with partial state. Indexer spare keys and the
+moving spare row are preserved, including checkpoint rewinds. These development
+changes and the optional disk-tier boundary are described in the
+[shared-core proposal](plans/shared-conversation-snapshots.md).
 The engine log reports parking, restoration, bytes and evictions. Snapshots are not
 persisted across restarts. See [the design and validation gates](plans/multi-conversation-cache.md).
 

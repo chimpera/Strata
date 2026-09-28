@@ -60,6 +60,14 @@ a production engine unless there is sufficient GPU and host memory.
 
 ## Status
 
+This document's historical results describe the original prototype and its
+0.1.15 integration. The separate 0.1.18 development branch now has a
+[shared-core proposal and acceptance checklist](shared-conversation-snapshots.md).
+Its audit found that the original snapshots/fingerprints omitted `idx_dead` and
+the moving indexer spare row; the new core preserves these and the new harnesses
+require the expanded fingerprint. Earlier parity results remain valid only for
+the fields and fixtures actually measured, not those previously omitted fields.
+
 Feature implemented; all five correctness gates above have passing evidence for
 the original feature revision `9d154ed`, before the upstream integration below.
 Verified on 2026-09-28:

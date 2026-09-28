@@ -15,6 +15,7 @@ from serve.server import StrataEngine, child_env
 from serve.frontend import ChatTemplate
 import strata_tokenizer as ST
 
+STATE_KEYS = ('L', 'gdn', 'ple', 'tail', 'dead', 'pooled', 'kv', 'ple_prev')
 
 def require(condition, message):
     if not condition:
@@ -41,7 +42,7 @@ def verify_pressure(results, budget_mib, oversized=False):
                 'pressure request did not finish normally')
         require(before['reused'] == after['reused'] == 0, 'pressure did not force a cache miss')
         require(before['ids'] == after['ids'], 'pressure output differs')
-        keys = {'L', 'gdn', 'ple', 'tail', 'pooled', 'kv', 'ple_prev'}
+        keys = set(STATE_KEYS)
         require(keys <= before['state'].keys() and keys <= after['state'].keys(), 'missing pressure state')
         require(before['state'] == after['state'], 'pressure state differs')
     for key in ('expert_slots', 'kv', 'kv_resident', 'context', 'spec', 'mtp_max', 'lookup', 'cvec'):
@@ -66,7 +67,7 @@ def verify_results(results, prompt_tokens, spec):
     baseline, candidate = results['baseline'], results['candidate']
     require([r['name'] for r in baseline] == ['A', 'A+'], 'incomplete baseline')
     require([r['name'] for r in candidate] == ['A', 'B', 'A+', 'B-again', 'A+-checkpoint'], 'incomplete candidate')
-    state_keys = {'L', 'gdn', 'ple', 'tail', 'pooled', 'kv', 'ple_prev'}
+    state_keys = set(STATE_KEYS)
     for record in baseline + candidate:
         require(bool(record['ids']), 'missing generated tokens')
         require(record['finish'] in ('length', 'stop'), 'request did not finish normally')
@@ -95,6 +96,18 @@ def verify_exchange(results, prompt_tokens, spec, budget_mib):
                 for p in evidence['parks']), 'invalid exchange snapshot budget')
 
 
+def verify_admission(results, budget_mib, floor_mib):
+    evidence = results['pressure']
+    require(evidence['memory_skips'] == 3 and evidence['skips'] == 0 and not evidence['parks'],
+            'expected physical-memory denial, not oversized-budget fallback')
+    require(results['engine_info']['candidate']['conversation_cache_min_free_mib'] == floor_mib,
+            'physical RAM floor differs')
+    # The same four cold requests must preserve output and complete state. Reuse
+    # the oversized gate's no-parking assertions after checking the actual cause.
+    equivalent = {**results, 'pressure': {**evidence, 'skips': evidence['memory_skips']}}
+    verify_pressure(equivalent, budget_mib, oversized=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--config', type=Path, required=True)
@@ -102,14 +115,16 @@ def main():
     ap.add_argument('--output', type=Path, required=True, help='new private directory; existing paths refused')
     ap.add_argument('--cache-mib', type=int, default=8192)
     ap.add_argument('--paragraphs', type=int, default=128)
-    ap.add_argument('--scenario', choices=('reuse', 'pressure', 'oversized', 'exchange'), default='reuse',
+    ap.add_argument('--scenario', choices=('reuse', 'pressure', 'oversized', 'exchange', 'admission'), default='reuse',
                     help='pressure requires snapshots fitting individually but not together; oversized requires none to fit')
+    ap.add_argument('--min-free-mib', type=int, default=2560,
+                    help='physical RAM floor; for admission denial choose a value above available system RAM')
     ap.add_argument('--spec', type=int, default=1, choices=range(1, 9),
                     help='decode window cap; 1 uses engine --spec 2 --mtp-max-t 1 for native IQ packs')
     ap.add_argument('--run', action='store_true')
     a = ap.parse_args()
-    if a.cache_mib <= 0 or a.paragraphs < 1:
-        ap.error('cache-mib and paragraphs must be positive')
+    if a.cache_mib <= 0 or a.paragraphs < 1 or not 0 <= a.min_free_mib <= (2**63 - 1) // (1024 * 1024):
+        ap.error('cache-mib/paragraphs must be positive and min-free-mib must fit the engine range')
     if not a.run:
         print(f'Dry run: {a.scenario}; paired baseline/candidate; fixed residency, greedy output.')
         print('No model loaded. Use --run only with a separately available GPU/test window.')
@@ -139,6 +154,7 @@ def main():
     for label, budget in [('baseline', 0), ('candidate', a.cache_mib)]:
         log = a.output / f'{label}.log'
         args = engine_args(cfg, budget, a.spec)
+        args += ['--conversation-cache-min-free-mib', str(a.min_free_mib)]
         engine = StrataEngine(str(a.engine.resolve()), args, cwd=cfg.get('cwd'), log=str(log), env=env)
         results['engine_info'][label] = dict(engine.info)
         records = []
@@ -149,7 +165,7 @@ def main():
         try:
             # One output token leaves exactly A's prompt as the live prefix,
             # avoiding the pre-existing accepted-draft output-cap overshoot.
-            if a.scenario in ('pressure', 'oversized'):
+            if a.scenario in ('pressure', 'oversized', 'admission'):
                 generate(A, 1, 'A')
                 generate(B, 1, 'B')
                 generate(C, 1, 'C')
@@ -171,7 +187,7 @@ def main():
                 fields = dict(re.findall(r'(\w+)=([0-9a-f,-]+)', line))
                 # Padding and the drafter's final uncomputed cell aren't used
                 # main-model state; do not gate on their diagnostic hashes.
-                hashes.append({k: fields[k] for k in ('L', 'gdn', 'ple', 'tail', 'pooled', 'kv', 'ple_prev')})
+                hashes.append({k: fields[k] for k in STATE_KEYS})
         require(len(hashes) == len(records), 'missing state hashes')
         for record, fingerprint in zip(records, hashes):
             record['state'] = fingerprint
@@ -181,9 +197,13 @@ def main():
             parks = re.findall(r'conversation cache: parked \d+ tokens .*?parked=(\d+) bytes=(\d+) evictions=(\d+)', log_text)
             results['pressure'] = {
                 'parks': [dict(zip(('parked', 'bytes', 'evictions'), map(int, p))) for p in parks],
-                'skips': log_text.count('conversation cache: skip parking (snapshot ')}
+                'skips': log_text.count('conversation cache: skip parking (snapshot '),
+                'memory_skips': log_text.count('conversation cache: skip parking (physical RAM admission;')}
     (a.output / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
-    if a.scenario == 'exchange':
+    if a.scenario == 'admission':
+        verify_admission(results, a.cache_mib, a.min_free_mib)
+        print('PASS: physical-memory admission denial, output and byte-exact main-model state')
+    elif a.scenario == 'exchange':
         verify_exchange(results, len(A), a.spec, a.cache_mib)
         print('PASS: bounded incoming/outgoing exchange, A/B/A output and checkpoint reuse')
     elif a.scenario == 'reuse':

@@ -104,3 +104,41 @@ benchmark substitutes for that evidence.
 
 No unified PR should claim the whole contract until these gates and the
 collaborators' interface/ownership review are complete.
+
+## Development checks
+
+The first development pass implements the RAM-side shared core and host-memory
+admission; it does not connect the NVMe tier or define a stable disk ABI. Configure
+with `-DSTRATA_BUILD_CONVERSATION_TESTS=ON` and build/run these targets:
+
+```sh
+cmake --build build --target conversation_cache_test conversation_memory_test conversation_snapshot_test conversation_validation_test
+ctest --test-dir build -R '^conversation_(cache|memory|snapshot|validation)_test$' --output-on-failure
+python -m unittest tools.test_conversation_cache_parity tools.test_conversation_cache_isolation tools.test_conversation_cache_http_smoke tools.test_conversation_cache_soak
+```
+
+`conversation_validation_test` links CUDA but runs with devices hidden and checks
+invalid-image rejection without CUDA initialization. On GNU/Clang ELF platforms,
+also build `conversation_transfer_test`: link-wrapped host copies/synchronization
+inject first-copy, partial-copy and final-sync failures into the real restore
+control flow. This demonstrates fail-closed outcomes, not hardware-context recovery.
+Run that target with `ctest --test-dir build -R '^conversation_transfer_test$' --output-on-failure`.
+`conversation_snapshot_test` uses small real-GPU fixtures, including distinct spare
+keys, early checkpoint rewinds and both expert-count metadata variants. Geometry
+fixtures are not a full-model Coder run.
+
+The private parity script's `--scenario admission --min-free-mib N` gate requires
+three physical-memory admission skips, no budget-related skips, and unchanged
+output/state. Choose an `N` above the machine's available physical RAM to test
+denial without actually exhausting memory.
+
+`tools/conversation_cache_soak.py` defaults to no I/O or model loading. With
+`--config CONFIG --engine ENGINE --output NEW_DIRECTORY --run`, it runs at least
+30 A/B/A cycles across three approximate lengths (`--prompt-tokens 2048,40000,120000`).
+Select lengths for the test configuration: the largest must cross resident KV and
+reach at least 90% of maximum context, while leaving room for the continuation.
+It checks known secret-code answers, token/state parity against uninterrupted
+baselines, cache reuse and a steady-state retained-payload plateau. Request-end RSS
+samples are diagnostics, not a transient peak-memory bound. This is a synthetic
+soak, not the requested real Pi/Hermes task benchmark. Run all model gates only in
+an exclusive GPU window; no existing HTTP service is contacted by these scripts.

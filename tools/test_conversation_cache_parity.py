@@ -6,11 +6,11 @@ import sys
 import tempfile
 import unittest
 
-from tools.conversation_cache_parity import engine_args, verify_exchange, verify_pressure, verify_results
+from tools.conversation_cache_parity import STATE_KEYS, engine_args, verify_admission, verify_exchange, verify_pressure, verify_results
 
 
 def fixture():
-    state = {k: '1234' for k in ('L', 'gdn', 'ple', 'tail', 'pooled', 'kv', 'ple_prev')}
+    state = {k: '1234' for k in STATE_KEYS}
     def record(name):
         return {'name': name, 'ids': [123], 'finish': 'length', 'state': dict(state), 'reused': 100}
     info = {'expert_slots': 100, 'kv': 'int8', 'kv_resident': 32768, 'context': 65536,
@@ -38,6 +38,7 @@ class ParityGate(unittest.TestCase):
     def test_incomplete_or_different_evidence_fails(self):
         cases = {
             'missing state': lambda d: d['candidate'][2]['state'].clear(),
+            'missing spare key': lambda d: d['candidate'][2]['state'].pop('dead'),
             'empty output': lambda d: d['candidate'][2]['ids'].clear(),
             'missing request': lambda d: d['candidate'].pop(),
             'state differs': lambda d: d['candidate'][2]['state'].update(gdn='ffff'),
@@ -88,6 +89,22 @@ def pressure_fixture():
 
 
 class PressureGate(unittest.TestCase):
+    def test_physical_memory_admission_evidence(self):
+        data = pressure_fixture()
+        data['pressure'] = {'memory_skips': 3, 'skips': 0, 'parks': []}
+        data['engine_info']['candidate']['conversation_cache_min_free_mib'] = 999999
+        verify_admission(data, 400, 999999)
+        for mutate in (
+            lambda d: d['pressure'].update(memory_skips=0, skips=3),
+            lambda d: d['pressure'].update(memory_skips=2),
+            lambda d: d['engine_info']['candidate'].update(conversation_cache_min_free_mib=2560),
+            lambda d: d['candidate'][3].update(reused=10),
+        ):
+            broken = copy.deepcopy(data)
+            mutate(broken)
+            with self.assertRaises(AssertionError):
+                verify_admission(broken, 400, 999999)
+
     def test_incoming_exchange_evidence(self):
         data = fixture()
         data['engine_info']['candidate']['conversation_cache_mib'] = 400
