@@ -191,17 +191,38 @@ The merged tree passes a separate CUDA 13.4 / SM89 portable-AVX2 engine build,
 35 CPU cache-policy checks, 891 GPU snapshot checks, 12 CLI parsing/help checks,
 and 35 Python tests (17 cache-harness tests and 18 server tests).
 
-The running engine was not restarted or reconfigured. Full-model parity and
-switching benchmarks have not been rerun on this merged revision; the results
-above remain evidence for the original feature revision, not the changed
-upstream prefill/expert kernels. Repeat those gates in a maintenance window
-before treating this integration as end-to-end validated.
+The merge itself did not restart or reconfigure the running engine. In a
+subsequently authorized maintenance window, all eight full-model gates passed
+on merged revision `eb6a392`: single-token reuse/checkpoint state parity, long
+speculative reuse/checkpoint parity, byte-pressure eviction, oversized snapshots,
+incoming/outgoing exchange budgeting, image identity, and control-vector
+isolation in add/project modes. The 12-request HTTP smoke test also passed on
+an exclusive localhost endpoint with normal adaptive settings, including slot
+eviction, streaming cancellation, and cached recovery without a process restart.
+
+The merged long-context test used 51133-token A and 51135-token B, fixed 8700
+expert slots, INT8 KV with 32768 resident cells, spec 4, and suffix drafting off.
+Initial A read took 46.558 seconds. Returning after B reused 51133 tokens and
+read 22 in 1.363 seconds including parking/restoring; checkpoint recovery reused
+51148 tokens and read 7 in 0.580 seconds. Both restored outputs and main-model
+state fingerprints match the uninterrupted baseline. This synthetic switch test
+is not a matched performance comparison against the original feature binary.
+
+Evidence is retained locally under the ignored
+`logs/upstream-merge-validation-20260928-F1emt1/` directory, including paired
+engine logs/results and `http-smoke.json`. The earlier measurements above remain
+specific to the original feature revision.
 
 ## Deployment and rollback
 
 The original Pi trial used an 8192 MiB host-RAM budget and four parked slots, with
 the existing text-only model configuration otherwise unchanged. HTTP health
 and generation checks pass; image/steering tests ran in separate private engines.
+
+After the upstream-integration gates passed, the merged engine was deployed
+with the same 8192 MiB/four-slot cache settings. The normal launch configuration
+selects the merged binary; the prior binary and configuration are preserved for
+rollback. Final HTTP generation and idle/empty-queue health checks passed.
 
 To try this feature, preserve the original binary and configuration, then add
 the two opt-in flags to the engine arguments and restart in a maintenance window.
