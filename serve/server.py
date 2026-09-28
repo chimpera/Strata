@@ -76,6 +76,57 @@ class EngineDied(RuntimeError):
     """The engine process ended in the middle of a request (issue #27: on Linux, the out-of-memory killer)."""
 
 
+def narrate_start(log_path: str, offset: int, args: list, done: threading.Event, heartbeat=20.0) -> None:
+    """While the engine starts, say in the server window what it is doing, from its log: the start reads tens of GB
+    into RAM and locks part of it for the GPU, and on many PCs everything is slow or frozen for a minute or more -
+    people closed the window thinking it had hung.  The warning comes at that step, not after it."""
+    gb = 0.0
+    if "--native" in args:                              # about the size of the experts it will read
+        try:
+            gb = os.path.getsize(args[args.index("--native") + 1]) / 1e9
+        except (OSError, IndexError):
+            pass
+    size = f"about {gb:.0f} GB" if gb >= 1 else "tens of GB"
+    t0 = last = time.time()
+    said = set()
+
+    def say(key, text):
+        nonlocal last
+        if key not in said:
+            said.add(key)
+            last = time.time()
+            print(text, flush=True)
+
+    say("weights", "[strata] starting the engine: reading the model's weights ...")
+    pos = offset
+    while not done.wait(0.5):
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(pos)
+                chunk = f.read()
+        except OSError:
+            chunk = b""
+        if chunk.count(b"\n"):
+            cut = chunk.rfind(b"\n") + 1
+            pos += cut
+            for line in chunk[:cut].decode("utf-8", "replace").splitlines():
+                if "PLE on" in line or "expert arena:" in line:
+                    say("arena", f"[strata] loading the experts into RAM ({size}) and locking part of them for the GPU.\n"
+                                 "         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.\n"
+                                 "         Please wait and don't close this window; the browser opens when it is ready.")
+                elif " loaded " in line and "GiB at" in line:
+                    say("loaded", "[strata] experts loaded: " + line.split(" loaded ", 1)[1].strip() +
+                        f" ({time.time() - t0:.0f} s so far)")
+                elif "expert cache " in line and " slots, " in line and "auto" not in line:
+                    n = line.split("expert cache ", 1)[1].split(";")[0].replace(" slots,", " experts,").strip()
+                    say("cache", f"[strata] filling the GPU's expert cache ({n}) ...")
+                elif "session is up" in line:
+                    say("up", "[strata] almost ready ...")
+        if time.time() - last > heartbeat:
+            last = time.time()
+            print(f"[strata] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -90,6 +141,10 @@ class StrataEngine:
         self.spawn = (exe, list(args), cwd, log, env)   # to start it again after it died (issue #27)
         self.log_path = log
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
+        loading = threading.Event()                     # set once READY: the narrator below stops
+        if log:
+            threading.Thread(target=narrate_start, args=(log, os.path.getsize(log), args, loading),
+                             daemon=True).start()
         self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
         self.max_context = 0
@@ -111,6 +166,7 @@ class StrataEngine:
                 self.max_context = int(f[1])
                 self.can_stop = "stop" in f[2:]
                 break
+        loading.set()
         if self.max_context <= 0:
             raise RuntimeError("the engine exited before it was ready" + (f" (see {log})" if log else ""))
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
@@ -380,6 +436,9 @@ def child_env(cfg: dict) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
     env = dict(os.environ)
+    if cfg.get("gpu") is not None:                   # issue #51: the GPU to run on, numbered as nvidia-smi does; CUDA's
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"      # own default order (fastest first) can number the cards otherwise
+        env["CUDA_VISIBLE_DEVICES"] = str(cfg["gpu"])
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -488,7 +547,8 @@ class Service:
         """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
         if getattr(self, "telemetry", None) is None:
             from serve.telemetry import Telemetry
-            self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s()})
+            self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s()},
+                                       gpu_index=int(getattr(self, "gpu_index", 0) or 0))
 
     def _tok_s(self):
         with self.status_lock:
@@ -986,14 +1046,15 @@ def make_handler(svc: Service):
         def do_POST(self):
             if not self._authorized():
                 return
-            if self.path.rstrip("/") == "/settings":
+            path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
+            if path == "/settings":
                 self._settings()
                 return
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-                if self.path.rstrip("/") == "/v1/chat/completions":
+                if path == "/v1/chat/completions":
                     self._openai(req)
-                elif self.path.rstrip("/") == "/v1/messages":
+                elif path == "/v1/messages":
                     self._anthropic(req)
                 else:
                     self._json(404, {"error": {"message": "not found"}})
@@ -1252,6 +1313,7 @@ def main() -> int:
                          "on your network (set an API key); also \"host\" in the config")
     ap.add_argument("--script", default="Thinking about it.</think>\n\nHello from the mock engine.")
     ap.add_argument("--port", type=int, default=8095)
+    ap.add_argument("--gpu", type=int, help="the GPU to run on, as nvidia-smi numbers them (also \"gpu\" in the config)")
     ap.add_argument("--tokenizer", default=str(ROOT / "pack/full/tokenizer"),
                     help="pack tokenizer directory (falls back to a byte tokenizer if absent)")
     ap.add_argument("--open", action="store_true", help="open the local page in the browser once the model is ready")
@@ -1262,6 +1324,8 @@ def main() -> int:
                     help="require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
+    if a.gpu is not None:
+        cfg["gpu"] = a.gpu
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
     try:                                                # before the minutes of loading: is the port free?
         Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
@@ -1308,6 +1372,7 @@ def main() -> int:
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
+    svc.gpu_index = cfg.get("gpu") or 0                 # the Monitor reads the card the engine runs on (issue #51)
     if a.config:                                        # the Chat settings shared with other apps, from last time
         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
         try:

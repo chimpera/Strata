@@ -24,6 +24,7 @@ measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
 | **IQ2_XS** | 461 | 811 | 1,238 | 1,136 | 1,071 | 886 |
 | **IQ3_XXS** | 415 | 770 | 1,108 | 1,065 | 1,015 | - |
 | **IQ3_S** | 396 | 737 | 1,070 | 1,070 | 931 | - |
+| **Coder** | 599 | 1,152 | 1,298 | 1,350 | 1,266 | 1,034 |
 
 ### Output (tokens/s)
 
@@ -33,6 +34,7 @@ measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
 | **IQ2_XS** | 74.4 | 73.8 | 71.5 | 64.3 | 59.8 | 52.8 |
 | **IQ3_XXS** | 60.3 | 62.1 | 51.4 | 50.0 | 45.8 | - |
 | **IQ3_S** | 51.5 | 51.6 | 48.2 | 48.8 | 40.5 | - |
+| **Coder** | 53.3 | 50.6 | 53.3 | 50.8 | 44.0 | 42.8 |
 
 Output speed depends on the text as well: speculative decoding runs faster when more of the drafted tokens are
 accepted, so a different answer to the same prompt moves it by several percent. Run back to back on the 4K prompt,
@@ -102,7 +104,24 @@ of [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next).
 | **IQ2_XS** | 68 GB | ~36 GB experts + ~6 GB | close to Q2_0 | a bit better |
 | **IQ3_XXS** | 76 GB | ~43 GB experts + ~6 GB | slower (more CPU work) | best |
 
-With 64 GB of RAM all three fit (close the browser for IQ3_XXS, and keep its context at 128K or less). With 48 GB only Q2_0 / IQ2_XS may fit. 32 GB is not enough.
+With 64 GB of RAM all three fit (close the browser for IQ3_XXS, and keep its context at 128K or less). With 48 GB only Q2_0 / IQ2_XS may fit. With 32 GB: the Coder (below).
+
+### Or: the Coder (half the experts, for code)
+
+**[Qwen3.8-Flash-Next GSQ-RCO Coder](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)** is
+ISTA-DASLab's expert-pruned release: 256 of each layer's 512 experts are kept (still 10 active per token), chosen with
+RCO on code, agentic and vision calibration data; its authors report 91.3% of the full model's SWE-bench Verified and
+98.7% of LiveCodeBench v6. One size, named IQ1_M for its 1.89 bits per *original* parameter; the kept experts are
+stored like IQ3_S (IQ2_S-IQ4_XS gate/up, IQ4_NL/Q2_0 down). Shard 1 is 29.6 GB (experts: 23 GB of RAM), so it runs
+on **32 GB of RAM**, and at 262K on 64 GB. Its shard 2 and its vision encoder are the original's files: with the
+original installed, setup downloads only shard 1. Strata ships its expert profile (`data/expert-profile-coder.bin`,
+the shipped ranking mapped onto the kept experts through the release's `rco-allocation.txt`: 72% of the expert
+reads hit the GPU on a 12 GB card). Images work; the experimental speed projection loads and runs on it (it was made
+for the full model).
+
+```
+START-HERE.bat --setup --family coder
+```
 
 ### Or: Swift 1.5 (a fine-tune that thinks shorter)
 
@@ -134,7 +153,11 @@ You need **only an NVIDIA driver** (version 580 or newer; update it with the NVI
 | Disk | ~70-80 GB free for the model, ~6 GB for the MTP layer (+1 GB with images). **Q2_0 on an AVX-512 CPU** also writes a one-time ~40 GB copy of its experts for the fast CPU kernel. An NVMe SSD is strongly recommended. |
 | OS | Windows 10/11, or Linux (Ubuntu 22.04/24.04 get everything installed automatically). |
 
-What the first start installs, all inside this folder (`.venv/`, `engine/`, `third_party/`, `models/`, `packs/`, `mtp/`):
+What the first start installs: in this folder `.venv/`, `engine/` and `third_party/`; the model files (`models/`,
+`packs/`, `mtp/`, 70-120 GB) in **`Strata-data` next to this folder**, so a new copy of Strata (an update unzipped
+elsewhere) finds them and sets itself up the same way. The place is remembered per user (`%APPDATA%\Strata\settings.json`,
+`~/.config/strata/settings.json`); `--data-dir` chooses another. Installs from before 0.1.16 are moved there by the next
+start (a rename on the same drive; files on another drive are used where they are).
 Python 3.12 if you have none (for your user account, no admin), a private Python environment, NVIDIA's CUDA libraries
 (from pip, ~0.4 GB), the ready-made Strata engine for RTX 30/40/50, the model and the MTP draft layer. If no
 ready-made engine fits your PC, it offers to install the build tools (Visual Studio Build Tools + CUDA Toolkit on
@@ -170,9 +193,12 @@ downloaded again. Closing the window stops the model.
 
 ```
 START-HERE.bat --setup                          install another model, or change context / images
+SETUP.bat                                       the same (double-click it)
 START-HERE.bat --model IQ2_XS --context 32768 --vision yes --yes     no questions
 START-HERE.bat --gguf-dir D:\models\IQ2_XS       use GGUF files you already have
+START-HERE.bat --data-dir E:\Strata-data         keep the model files somewhere else
 START-HERE.bat --port 8081                      another port
+START-HERE.bat --gpu 1                          another GPU (numbered as nvidia-smi; setup picks the one with the most VRAM)
 ```
 
 With more than one model installed, it asks which one to start. `run-<model>.bat` starts a model directly.
@@ -249,6 +275,9 @@ print(r.choices[0].message.content)
   15 s, and `GET /status` says what it is doing (`reading the prompt`, `answering`, tokens so far). Closing the
   connection or pressing stop in your app really stops the model, so the next request starts at once.
 - **Chat apps.** Any app with an "OpenAI-compatible" provider works: base URL `http://127.0.0.1:8080/v1`, any API key.
+- **Claude Code** (Strata 0.1.17 or newer): set `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` and
+  `ANTHROPIC_MODEL` to a Claude model name it knows (it refuses names it doesn't; Strata ignores the name), plus any
+  `ANTHROPIC_AUTH_TOKEN` (or your `api_key`, if you set one).
 - **Context.** Chosen in setup (8K-262K). Requests longer than that are refused, never silently cut. A request whose
   `max_tokens` would run past the context is refused too (400); agents that always ask for their full output cap
   can instead get it shortened to the room left: add `"fit_max_tokens": true` to `strata-<model>.json` (or pass
@@ -419,7 +448,7 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
 | `port 8080 is already in use` | Strata is already running (look for its window), or another program uses the port: `START-HERE.bat --port 8081`. |
 | `cudaHostRegister ... out of memory` in the log | Normal on Windows: the engine pins the experts in per-layer slices instead. Only a problem if the load then fails. |
 | The first start takes minutes | It is reading 34-55 GB into RAM; the second start is faster while the files are in the OS cache. |
-| The PC freezes for a few minutes at the first start | Normal the first time: the engine loads the experts into RAM, pins part of it for the GPU and sizes the expert cache. Wait; don't close the window. Still frozen after 10 minutes: restart the PC, close other programs, try again, or pick a smaller size. |
+| The PC freezes for a few minutes at the start | Normal, most of all the first time (the server window says when it happens): the engine loads the experts into RAM, pins part of it for the GPU and sizes the expert cache. Wait; don't close the window. Still frozen after 10 minutes: restart the PC, close other programs, try again, or pick a smaller size. |
 | `the engine stopped unexpectedly (exit code ...)` | The engine process ended mid-answer - usually out of RAM (Linux ends the biggest program: `sudo dmesg \| grep -i -E 'killed process\|out of memory'`). The next request starts it again by itself. If it repeats: close other programs or pick a smaller size. The server also warns at start when the model's experts leave less than ~6 GB of RAM for everything else. |
 | Slow output, disk light busy | Not enough free RAM: close other programs, or choose Q2_0 / IQ2_XS. |
 | `prompt ... exceeds the context` | The request is longer than the context you chose: run setup again with a bigger `--context`. |
@@ -456,8 +485,12 @@ The full story, with measurements, bottlenecks and what comes next: **[docs/pape
 
 ## Credits and licenses
 
+Strata itself: [MIT](../LICENSE). The model files are not part of it; their licenses apply to them (below).
+
 - Model: [Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team; quantizations:
   [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF).
+  The Coder: [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF)
+  (Apache-2.0 per its card); its support in Strata came from @pjgmobile's PR #54.
   Swift 1.5: [ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF)
   by UkisAI. Their licenses apply to the weights.
 - [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) (MIT): the i-quant formats, the GPU dot products and
@@ -468,3 +501,5 @@ The full story, with measurements, bottlenecks and what comes next: **[docs/pape
   [HyperQwen](https://github.com/syv-ai/HyperQwen); references in the paper.
 - The web app's font: [Outfit](https://github.com/Outfitio/Outfit-Fonts) (SIL Open Font License 1.1, see
   `serve/web/fonts/OFL.txt`). Its Monitor tab started from @code-martin's dashboard idea (PR #22).
+- The experimental speed projection's vector (`data/experimental-speed-projection/`): Qwen Community License 1.0,
+  made from the model's activations (see its README).
