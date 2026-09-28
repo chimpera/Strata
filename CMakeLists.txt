@@ -32,7 +32,15 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt AND EXISTS ${CMAKE_CU
   set(_strata_tests_default ON)
 endif()
 option(STRATA_BUILD_TESTS "Build the test suite" ${_strata_tests_default})
+option(STRATA_BUILD_CONVERSATION_TESTS "Build standalone conversation cache tests" OFF)
 option(STRATA_WERROR "Treat compiler warnings as errors" OFF)
+
+if(STRATA_BUILD_CONVERSATION_TESTS)
+  enable_testing()
+  add_executable(conversation_cache_test src/core/conversation_cache_test.cpp)
+  target_include_directories(conversation_cache_test PRIVATE include)
+  add_test(NAME conversation_cache_test COMMAND conversation_cache_test)
+endif()
 
 if(STRATA_ENABLE_CUDA)
   enable_language(CUDA)
@@ -239,9 +247,16 @@ if(STRATA_ENABLE_CUDA)
   # library is the honest shape of the dependency graph: core knows about devices and weights, kernels know
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
   add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp
-    src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp)
+    src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
+    src/core/conversation_snapshot.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu CUDA::cudart)
+  if(STRATA_BUILD_CONVERSATION_TESTS)
+    add_executable(conversation_snapshot_test src/core/conversation_snapshot_test.cpp)
+    target_link_libraries(conversation_snapshot_test PRIVATE strata_engine)
+    add_test(NAME conversation_snapshot_test COMMAND conversation_snapshot_test)
+    set_tests_properties(conversation_snapshot_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+  endif()
 
   # `strata generate` (P2.S6).  The FIRST user-facing program: everything under it is a component, and this is
   # what composes them into a token.  No tokenizer - the prompt arrives as ids - because Gate C1 compares logits

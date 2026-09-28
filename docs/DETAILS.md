@@ -237,8 +237,22 @@ live session, or one of the checkpoints it keeps in RAM (up to 6, ~118 MB each, 
 assistant turn and every 16K prompt tokens). A checkpoint is used only when the prompt starts with exactly its tokens
 and pictures. Engine options: `--prompt-cache N` (0 = off), `--prompt-cache-every N`, `--turn-token ID`.
 
+**Multiple conversations (opt-in).** Add `--conversation-cache-mib 8192
+--conversation-cache-slots 4` to the engine arguments to park up to four conversations
+in a bounded 8 GiB host-RAM cache. This preserves controller/worker histories when
+their requests alternate; it does not execute requests concurrently. No client session
+ID is required: only exact token/image prefixes with matching steering mode are reused.
+The default budget is 0 (disabled); `--prompt-cache 0` also disables parking.
+
+Snapshots contain running state, checkpoints, used K/V pages, and draft-layer K/V.
+They add host RAM, not another model or VRAM allocation. The byte budget also counts
+an incoming snapshot during a switch; oldest parked entries are evicted first.
+Oversized snapshots or host allocation failures fall back to ordinary prompt processing.
+The engine log reports parking, restoration, bytes and evictions. Snapshots are not
+persisted across restarts. See [the design and validation gates](plans/multi-conversation-cache.md).
+
 **Current limits (v1):** one request at a time, and one conversation cached at a time (switching between two chats
-re-reads the other one); images only when set up with them (below); no video. **Temperature / top_p / top_k / min_p /
+re-reads the other one unless the opt-in cache above is enabled); images only when set up with them (below); no video. **Temperature / top_p / top_k / min_p /
 seed** are honored per request (OpenAI and Anthropic fields); with the default adaptive expert tier a sampled result
 is not reproducible run to run - for seed-reproducible output add `--adapt-every 100000` (static residency) to the
 engine arguments. The run config's optional `sampling` block sets the defaults for requests that leave the fields out
