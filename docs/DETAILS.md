@@ -11,26 +11,34 @@ New here? Start with the [README](../README.md) - it has everything you need to 
 
 ## Speed (measured)
 
-RTX 5070 **12 GB**, Ryzen 5 7600 (6 cores), 64 GB DDR5-5200, Windows. One code-agent prompt per length, 256 generated
-tokens, MTP speculative decoding on. "262K" is the model's full context window (a 259,943-token prompt).
+RTX 5070 **12 GB**, Ryzen 5 7600 (6 cores), 64 GB DDR5-5200, Windows, engine 0.1.14 with the settings setup writes
+(`--prefill auto`, 8-bit KV above 4K, KV streaming from 64K). One code-agent prompt per length, 256 generated tokens,
+MTP speculative decoding on. "262K" is the model's full context window (a 259,943-token prompt). The IQ2_XS row was
+measured with Swift 1.5's IQ2_XS, which runs at the original's speed.
 
 ### Prompt processing (tokens/s)
 
 | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Q2_0** | 389 | 539 | 571 | 561 | 543 | 496 |
-| **IQ2_XS** | 332 | 463 | 495 | 486 | 472 | 437 |
-| **IQ3_XXS** | 285 | 410 | 435 | 427 | 414 | - |
-| **IQ3_S** | 260 | 374 | 397 | - | 378 | - |
+| **Q2_0** | 494 | 1,007 | 1,308 | 1,294 | 1,208 | 967 |
+| **IQ2_XS** | 461 | 811 | 1,238 | 1,136 | 1,071 | 886 |
+| **IQ3_XXS** | 415 | 770 | 1,108 | 1,065 | 1,015 | - |
+| **IQ3_S** | 396 | 737 | 1,070 | 1,070 | 931 | - |
 
 ### Output (tokens/s)
 
 | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| **Q2_0** | 88.7 | 94.6 | 87.5 | 76.4 | 65.1 | 56.3 |
-| **IQ2_XS** | 82.0 | 78.0 | 65.3 | 63.7 | 52.0 | 48.0 |
-| **IQ3_XXS** | 64.6 | 65.6 | 57.3 | 54.4 | 44.8 | - |
-| **IQ3_S** | 51.2 | 54.4 | 51.1 | - | 42.2 | - |
+| **Q2_0** | 84.3 | 90.3 | 73.6 | 69.0 | 67.2 | 60.3 |
+| **IQ2_XS** | 74.4 | 73.8 | 71.5 | 64.3 | 59.8 | 52.8 |
+| **IQ3_XXS** | 60.3 | 62.1 | 51.4 | 50.0 | 45.8 | - |
+| **IQ3_S** | 51.5 | 51.6 | 48.2 | 48.8 | 40.5 | - |
+
+Output speed depends on the text as well: speculative decoding runs faster when more of the drafted tokens are
+accepted, so a different answer to the same prompt moves it by several percent. Run back to back on the 4K prompt,
+0.1.14 writes 88.5 tokens/s and 0.1.12 85.7. The numbers before 0.1.13 (prompts about half as fast):
+[`bench/results/2026-09-24-final`](../bench/results/2026-09-24-final/matrix.md); these:
+[`bench/results/2026-09-28-speed-0114`](../bench/results/2026-09-28-speed-0114/README.md).
 
 IQ3_XXS and IQ3_S at 262K are not measured: with their 43 / 50 GB of experts, a 260K-token context brings a 64 GB PC
 to its memory limit. Use up to 128K with them on 64 GB (setup caps it). IQ3_S (engine 0.1.4 or newer) is only published
@@ -47,13 +55,27 @@ halves the KV cache's memory with a Hadamard rotation before 4-bit rounding (PR 
 is measurably less precise on long documents (perplexity +8-12%; needle tests still pass). 8-bit stays the default.
 Details: [`bench/results/2026-09-27-kv-q4`](../bench/results/2026-09-27-kv-q4/README.md).
 
-Time to first token is prompt length / prompt speed: about 7 s at 4K, 55 s at 32K, 4 minutes at 128K and 9 minutes at
-262K. The raw numbers: [`bench/results/`](../bench/results/). The [paper](paper/Strata-Paper.pdf) explains every number.
+Time to first token is prompt length / prompt speed: with Q2_0 about 4 s at 4K, 25 s at 32K, under 2 minutes at 128K
+and 4.5 minutes at 262K (engine 0.1.13 made long prompts about twice as fast, below).
+
+**Faster prompts (engine 0.1.13):** the prompt is read in chunks of up to 8,192 tokens instead of 2,048 (`--prefill
+auto`: the largest chunk whose buffers fit in the expert-cache slots it borrows, and a request borrows only what its
+prompt needs); the experts are multiplied by llama.cpp's quantized MMQ kernels instead of being expanded to FP16
+first; the next layer's experts stream over PCIe while the current layer's attention runs; the PLE block runs for the
+whole chunk at once; unpinned experts are copied by helper threads. Measured on the RTX 5070 12 GB, 64 GB RAM,
+32K-token prompt: Q2_0 572 -> 1,290 tokens/s, IQ3_S 383 -> 1,208. Through the server (Q2_0, 128K context): 999 tokens
+353 -> 438 tokens/s, 6,927 tokens 529 -> 1,077, 28,584 tokens 584 -> 1,249. Output speed is unchanged. Needles 5/5
+(1K-262K). Details and the quality check:
+[`bench/results/2026-09-28-prefill-speed`](../bench/results/2026-09-28-prefill-speed/README.md). Existing installs
+switch to `--prefill auto` the next time START-HERE / setup.sh starts them. The raw numbers:
+[`bench/results/`](../bench/results/). The [paper](paper/Strata-Paper.pdf) explains every number.
 
 ## Other GPUs (estimated)
 
 Not measured - estimated from the runs above (same CPU and 64 GB RAM): the GPU part scaled by memory bandwidth, the CPU
 part by how many more experts the card's VRAM holds. Treat as **±20%**. Numbers are *prompt / output* tokens/s.
+The prompt figures predate engine 0.1.13, which about doubled prompt speed on the measured card; how much of that a
+card gains depends on its PCIe link (the experts stream over it), so they are still the older estimates.
 
 | GPU | Model | 1K | 4K | 32K | 64K | 128K | 262K |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -65,7 +87,9 @@ part by how many more experts the card's VRAM holds. Treat as **±20%**. Numbers
 |  | IQ3_XXS | ~260 / ~106 | ~374 / ~103 | ~396 / ~89 | ~390 / ~85 | ~378 / ~71 | - |
 
 More VRAM matters more than a faster GPU: every extra GB holds ~700 more experts, and every expert on the GPU is one the
-CPU does not have to compute. A 3090's 24 GB takes most of the CPU work away.
+CPU does not have to compute. A 3090's 24 GB takes most of the CPU work away. (Since 0.1.14 the expert profile ranks
+all 24,576 experts; before, the cache stopped at 8,000, about 10-14 GB. `tools/make_profile.py` builds a profile from
+your own prompts: run the engine once with `--dump-routing trace.bin`, see the tool's help.)
 
 ## Which model?
 
@@ -171,6 +195,15 @@ The same questions, the same automatic install (it uses `sudo apt` for Python an
 for the build tools), and the same start: `http://127.0.0.1:8080`. Later runs of `./setup.sh` (or `./run-<model>.sh`)
 start the model directly. Options as on Windows (`./setup.sh --setup`, `--model Q2_0 --yes`, `--gguf-dir /data/Q2_0`).
 Terminal chat: `.venv/bin/python chat.py`.
+
+- **Updating:** `git pull`, then `./setup.sh`: it compiles the engine again when its source changed (a minute or
+  two for the changed files). If that compile fails, it says so and starts the engine you had.
+- **Other distributions** (Arch, Fedora, ...): install the C++ compiler and the CUDA Toolkit 13 with your package
+  manager first (Arch: `sudo pacman -S base-devel cuda`); setup finds `nvcc` on PATH, in `/usr/local/cuda*` and in
+  `/opt/cuda*`, and does the rest.
+- **WSL** works (Ubuntu 24.04 tested), with one limit: the NVIDIA driver pins only about 1 GB of RAM there, so KV
+  streaming (`--kv-resident`) is off and the KV cache stays in VRAM, and the experts are copied to the GPU from
+  unpinned RAM (slower prompts than native Linux).
 
 ---
 
@@ -395,7 +428,8 @@ the document, +0.4% on the chat. Details: `bench/results/2026-09-27-esp/`.
 | A picture is refused or `cannot read the image` | The file is not a picture Pillow can open (JPEG, PNG, WebP, GIF, BMP, TIFF, AVIF work). |
 | Pictures are slow (10-30 s) | The encoder runs on the CPU: run setup again with `--vision gpu` (needs ~1.4 GB of VRAM). |
 | A request never finishes: "reading the prompt", GPU "100%" at low power | The GPU ran out of VRAM (engines before 0.1.9 could end with ~30 MiB free at large contexts). Run `START-HERE.bat` once to get engine 0.1.9 or newer; the log then says `... MiB of VRAM free with everything loaded` (a few hundred) and names the `--vram-reserve-mib` to add if it is low. |
-| Generation stops mid-answer, GPU "100%", one CPU core busy | Fixed in engine 0.1.12 (issue #29, a race in the CPU expert pool on big-VRAM cards). Since then a request that stops moving for 2 minutes ends with an error instead of hanging: the log says `no progress for 120 s ... (issue #29)` with where it stopped, and the next request starts the engine again. If you see that line, please open an issue with it. (`STRATA_WATCHDOG_S` sets the 120 s; 0 turns it off.) |
+| Generation stops mid-answer, GPU "100%", one CPU core busy | Fixed in engine 0.1.12 (issue #29, a race in the CPU expert pool on big-VRAM cards). Since then a request that stops moving ends with an error instead of hanging (after 2 minutes; 1 minute from 0.1.13): the log says `no progress for ... s ... (issue #29)` with where it stopped, and the next request starts the engine again. If you see that line, please open an issue with it. Engine 0.1.13 adds a stall report under it (what every expert-pool thread and the GPU handshake were doing, memory and page faults) and, on Windows, a `strata-stall-<pid>.dmp` file with every thread's stack: attach both. (`STRATA_WATCHDOG_S` sets the time in seconds; 0 turns it off.) Engine 0.1.14 fixes the stall those reports found (issue #31: with the IQ packs the host could wait forever inside the NVIDIA driver while copying experts in a verify window; the experts are now copied by a GPU kernel, `--pcie-mode dma` restores the old way). |
+| `out of memory: cudaFuncSetAttribute` in the log (IQ3_XXS, long prompt) | Fixed in engine 0.1.15: CUDA loaded a kernel's code when it was first needed, and mid-prompt there was no VRAM left for it. Run `START-HERE.bat` (Windows) or `./setup.sh` (Linux) once to update. |
 | Anything else | The engine log is `strata-<model>.log` in this folder. |
 
 ---

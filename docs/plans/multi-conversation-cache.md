@@ -60,7 +60,8 @@ a production engine unless there is sufficient GPU and host memory.
 
 ## Status
 
-Feature implemented; all five correctness gates above have passing evidence.
+Feature implemented; all five correctness gates above have passing evidence for
+the original feature revision `9d154ed`, before the upstream integration below.
 Verified on 2026-09-28:
 
 - Full CUDA 13.4 / SM89 portable-AVX2 engine build and help smoke test pass.
@@ -180,9 +181,25 @@ conversations. An idle check cannot lock out new clients, so pause other clients
 first. Both the one-off sequence and the packaged script have passed against the
 real cache-enabled HTTP server.
 
+### Upstream integration (2026-09-28)
+
+Merged upstream `main` at `d551edf` (engine 0.1.15). The serving INFO-line
+conflict was resolved by retaining both engine-version reporting and the
+conversation-cache settings. Upstream prefill/MMQ and AVX2 changes are retained.
+
+The merged tree passes a separate CUDA 13.4 / SM89 portable-AVX2 engine build,
+35 CPU cache-policy checks, 891 GPU snapshot checks, 12 CLI parsing/help checks,
+and 35 Python tests (17 cache-harness tests and 18 server tests).
+
+The running engine was not restarted or reconfigured. Full-model parity and
+switching benchmarks have not been rerun on this merged revision; the results
+above remain evidence for the original feature revision, not the changed
+upstream prefill/expert kernels. Repeat those gates in a maintenance window
+before treating this integration as end-to-end validated.
+
 ## Deployment and rollback
 
-The live Pi trial uses an 8192 MiB host-RAM budget and four parked slots, with
+The original Pi trial used an 8192 MiB host-RAM budget and four parked slots, with
 the existing text-only model configuration otherwise unchanged. HTTP health
 and generation checks pass; image/steering tests ran in separate private engines.
 
