@@ -107,6 +107,9 @@ collaborators' interface/ownership review are complete.
 
 ## Development checks
 
+Revision-specific results and coverage limits are in the
+[validation record](shared-conversation-validation.md).
+
 The first development pass implements the RAM-side shared core and host-memory
 admission; it does not connect the NVMe tier or define a stable disk ABI. Configure
 with `-DSTRATA_BUILD_CONVERSATION_TESTS=ON` and build/run these targets:
