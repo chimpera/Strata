@@ -11,6 +11,8 @@ void check(bool value, const char* description) {
     ++checks;
     if (!value) { std::fprintf(stderr, "FAIL: %s\n", description); std::exit(1); }
 }
+uint64_t fake_now = 0;                       // driven by the expectancy tests' clock
+uint64_t fake_now_fn() { return fake_now; }
 SavedConversation image(std::initializer_list<int32_t> ids, bool cvec = true) {
     SavedConversation s;
     s.live.ids = ids;
@@ -208,6 +210,92 @@ int main() {
         check(!disabled.enabled() && !no_slots.enabled(), "both disable switches");
         check(!disabled.put(image({1,2,3})) && !no_slots.put(image({1,2,3})), "disabled cache stores nothing");
         check(disabled.best(a,{},true).tokens == 0, "disabled cache has no matches");
+    }
+    {
+        // --conversation-cache-policy expectancy, tier 1: a never-returned one-shot parked
+        // seconds ago is evicted before the older main conversation that has been returning
+        // all along.  Plain LRU evicts the MAIN here (least recently active) at exactly the
+        // moment the one-shot becomes dead forever.
+        const size_t one = image({1, 2, 3}).bytes();
+        const std::vector<int64_t> m = {1, 2, 3, 4};
+        fake_now = 1'000'000;
+        ConversationCache exp_(one * 2, 2, EvictionPolicy::expectancy);
+        exp_.set_clock_for_testing(&fake_now_fn);
+        check(exp_.put(image({1, 2, 3})), "park MAIN");
+        for (int i = 0; i < 2; ++i) {                    // MAIN returns twice, ~4 s apart
+            fake_now += 4'000;
+            exp_.put(exp_.take(exp_.best(m, {}, true).index));
+        }
+        fake_now += 2'000;
+        check(exp_.put(image({7, 7, 7})), "park the one-shot (newest)");
+        check(exp_.size() == 2 && exp_.best(m, {}, true).tokens == 3, "both parked before pressure");
+        fake_now += 70'000;                              // one-shot quiet 70 s (> grace); MAIN quiet 70 s (< floor)
+        check(exp_.put(image({9, 9, 9})), "pressure parks a third image");
+        check(exp_.evictions() == 1 && exp_.evictions_dead() == 1 && exp_.evictions_stale() == 0,
+              "the dead one-shot is the victim");
+        check(exp_.best(m, {}, true).tokens == 3, "MAIN survived");
+        check(exp_.best(std::vector<int64_t>{7, 7}, {}, true).tokens == 0, "the one-shot is gone");
+
+        ConversationCache lru(one * 2, 2);               // same traffic under default LRU
+        check(lru.put(image({1, 2, 3})), "park MAIN (lru)");
+        lru.put(lru.take(lru.best(m, {}, true).index));
+        lru.put(lru.take(lru.best(m, {}, true).index));
+        check(lru.put(image({7, 7, 7})), "park the one-shot (lru)");
+        check(lru.put(image({9, 9, 9})), "pressure (lru)");
+        check(lru.best(m, {}, true).tokens == 0 && lru.evictions() == 1,
+              "plain LRU evicted MAIN instead");
+    }
+    {
+        // tier 2: a lineage paced in seconds that falls silent for minutes is evicted, while
+        // a lineage whose OWN observed pace is minutes (a human chat behaving normally) is
+        // on pace and survives — even though it is the less recently active entry.
+        const std::vector<int64_t> sub = {5, 5}, human = {6, 6};
+        fake_now = 10'000'000;
+        const size_t one = image({6, 6}).bytes();
+        ConversationCache c(one * 2, 2, EvictionPolicy::expectancy);
+        c.set_clock_for_testing(&fake_now_fn);
+        check(c.put(image({6, 6})), "park the human-paced lineage");
+        fake_now += 600'000;                             // its one recorded return: 10 minutes later
+        c.put(c.take(c.best(human, {}, true).index));
+        fake_now += 1'000;
+        check(c.put(image({5, 5})), "park the harness-paced lineage");
+        for (int i = 0; i < 3; ++i) {                    // returns every second
+            fake_now += 1'000;
+            c.put(c.take(c.best(sub, {}, true).index));
+        }
+        fake_now += 480'000;                             // 8 min silent: stale for a 1 s pace, on pace for 10 min
+        check(c.put(image({8, 8})), "pressure");
+        check(c.evictions_stale() == 1 && c.evictions_dead() == 0,
+              "the fast lineage gone silent is the victim");
+        check(c.best(std::vector<int64_t>{6, 6, 9}, {}, true).tokens == 2,
+              "the on-pace slow lineage survived");
+        check(c.best(std::vector<int64_t>{5, 5, 9}, {}, true).tokens == 0,
+              "the stale fast lineage is gone");
+    }
+    {
+        // traffic rides the image through park -> restore -> re-park: bursts and gaps
+        // accumulate, and first_ms (lineage age) survives restores.
+        const std::vector<int64_t> a2 = {1, 2, 3};
+        fake_now = 20'000'000;
+        ConversationCache c(4096, 4, EvictionPolicy::expectancy);
+        c.set_clock_for_testing(&fake_now_fn);
+        c.put(image({1, 2, 3}));
+        fake_now += 3'000;
+        auto r = c.take(c.best(a2, {}, true).index);
+        check(r.traffic.bursts == 1 && r.traffic.gaps_n == 1 && r.traffic.gap_median_ms() == 3'000,
+              "the first return records its gap");
+        const uint64_t born = r.traffic.first_ms;
+        c.put(std::move(r));
+        fake_now += 5'000;
+        r = c.take(c.best(a2, {}, true).index);
+        check(r.traffic.bursts == 2 && r.traffic.gaps_n == 2 && r.traffic.gap_median_ms() == 4'000,
+              "gaps accumulate across re-parks");
+        check(r.traffic.first_ms == born, "lineage age survives restores");
+        ConversationTraffic tr;                          // the median itself, odd and even counts
+        tr.gaps = {4, 2, 10, 6}; tr.gaps_n = 4;
+        check(tr.gap_median_ms() == 5, "even-count median averages the middle pair");
+        tr.gaps = {9, 1, 5}; tr.gaps_n = 3;
+        check(tr.gap_median_ms() == 5, "odd-count median is the middle element");
     }
     std::printf("conversation_cache_test: %d checks passed\n", checks);
 }
